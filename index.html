@@ -57,7 +57,7 @@
     <div id="ui-layer">
         <div id="status" class="badge">🎄 Giang Sinh An Lành 🎄</div>
         <div class="guide">
-            🖐 <b>Xòe:</b> Bung Quà & Đèn &nbsp;|&nbsp; 👌 <b>Pinch:</b> Xem ảnh &nbsp;|&nbsp; ✊ <b>Nắm:</b> Thu cây
+            🖐 <b>Xòe:</b> Bung Quà & Đèn (di chuyển tay để xoay 360° mọi hướng) &nbsp;|&nbsp; 👌 <b>Pinch:</b> Xem ảnh &nbsp;|&nbsp; ✊ <b>Nắm:</b> Thu cây
         </div>
         <button id="btnStart" onclick="startSystem()">BẮT ĐẦU</button>
     </div>
@@ -129,21 +129,25 @@
         };
 
         let scene, camera, renderer;
+        let container; // New: Group để xoay toàn bộ như quả cầu
         let groupGold, groupRed, groupGift;
         let photoMeshes = [];    
+        let photoTargets = []; // New: Vị trí random trên quả cầu cho ảnh
         let titleMesh, starMesh;
         
         let state = 'TREE'; 
         let selectedIndex = 0;
         let handX = 0.5;
-        let rotationVelocity = 0;
-        let lastState = 'TREE';  // Biến mới để detect chuyển state
+        let handY = 0.5; // New: Để xoay lên xuống
+        let rotationVelocityY = 0; // Rename: Cho trục Y (trái phải)
+        let rotationVelocityX = 0; // New: Cho trục X (lên xuống)
+        let lastState = 'TREE';
 
         // ==========================================
         // 3. Init 3D
         // ==========================================
         function init3D() {
-            const container = document.getElementById('canvas-container');
+            const containerDiv = document.getElementById('canvas-container');
             scene = new THREE.Scene();
             scene.fog = new THREE.FogExp2(0x000000, 0.002);
 
@@ -153,11 +157,17 @@
             renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-            container.appendChild(renderer.domElement);
+            containerDiv.appendChild(renderer.domElement);
+
+            container = new THREE.Group(); // New: Container cho xoay 3D
+            scene.add(container);
 
             groupGold = createParticleSystem('gold', CONFIG.goldCount, 2.0);
             groupRed = createParticleSystem('red', CONFIG.redCount, 3.5);
             groupGift = createParticleSystem('gift', CONFIG.giftCount, 3.0);
+            container.add(groupGold);
+            container.add(groupRed);
+            container.add(groupGift);
 
             createPhotos();
             createDecorations();
@@ -213,7 +223,6 @@
             });
 
             const points = new THREE.Points(geo, mat);
-            scene.add(points);
             return points;
         }
 
@@ -231,9 +240,17 @@
                 border.position.z = -0.1; 
                 mesh.add(border);
                 
+                // Random vị trí trên quả cầu
+                const phi = Math.acos(2 * Math.random() - 1); // 0 to PI
+                const theta = Math.random() * Math.PI * 2; // 0 to 2PI
+                const x = CONFIG.photoOrbitRadius * Math.sin(phi) * Math.cos(theta);
+                const y = CONFIG.photoOrbitRadius * Math.sin(phi) * Math.sin(theta);
+                const z = CONFIG.photoOrbitRadius * Math.cos(phi);
+                photoTargets.push(new THREE.Vector3(x, y, z));
+
                 mesh.visible = false;
                 mesh.scale.set(0,0,0);
-                scene.add(mesh);
+                container.add(mesh); // Add vào container để xoay theo
                 photoMeshes.push(mesh);
             }
         }
@@ -251,7 +268,7 @@
             const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, blending: THREE.AdditiveBlending });
             titleMesh = new THREE.Mesh(new THREE.PlaneGeometry(60, 15), mat);
             titleMesh.position.set(0, 50, 0);
-            scene.add(titleMesh);
+            scene.add(titleMesh); // Giữ ngoài container
 
             const starCanvas = document.createElement('canvas');
             starCanvas.width = 128; starCanvas.height = 128;
@@ -268,10 +285,10 @@
             const starMat = new THREE.MeshBasicMaterial({ map: starTex, transparent: true, blending: THREE.AdditiveBlending });
             starMesh = new THREE.Mesh(new THREE.PlaneGeometry(12, 12), starMat);
             starMesh.position.set(0, CONFIG.treeHeight/2 + 2, 0);
-            scene.add(starMesh);
+            scene.add(starMesh); // Giữ ngoài container
         }
 
-        function updateParticleGroup(group, targetState, speed, velocity, time, isBlinking) {
+        function updateParticleGroup(group, targetState, speed, time, isBlinking) {
             const positions = group.geometry.attributes.position.array;
             const targetKey = (targetState === 'TREE') ? 'tree' : 'explode';
             const targets = group.geometry.userData[(targetState === 'PHOTO') ? 'explode' : targetKey];
@@ -291,7 +308,6 @@
                 }
             } else {
                 group.scale.set(1,1,1);
-                group.rotation.y += velocity;  // Xoay liên tục theo velocity
             }
         }
 
@@ -300,57 +316,92 @@
             const time = Date.now() * 0.001;
             const speed = 0.06;
 
-            let currentState = state;  // Lấy state hiện tại
+            let currentState = state;
 
             // Detect chuyển state từ EXPLODE sang PHOTO và snap ảnh vào giữa
             if (currentState === 'PHOTO' && lastState === 'EXPLODE') {
-                const angleStep = (Math.PI * 2) / 5;
-                const targetBaseAngle = - selectedIndex * angleStep;  // Snap để ảnh selected ở giữa (angle=0, z max)
-                groupGold.rotation.y = targetBaseAngle;
-                groupRed.rotation.y = targetBaseAngle;
-                groupGift.rotation.y = targetBaseAngle;
-                rotationVelocity = 0;  // Dừng xoay ngay lập tức
+                // Snap rotation để ảnh selected ở giữa (z max)
+                let maxZ = -999;
+                let bestAngleY = 0;
+                let bestAngleX = 0;
+                const tempRot = container.rotation.clone();
+                for(let rotX = -Math.PI; rotX < Math.PI; rotX += 0.1) {
+                    for(let rotY = 0; rotY < Math.PI * 2; rotY += 0.1) {
+                        container.rotation.set(rotX, rotY, 0);
+                        const worldPos = new THREE.Vector3();
+                        photoMeshes[selectedIndex].getWorldPosition(worldPos);
+                        if(worldPos.z > maxZ) {
+                            maxZ = worldPos.z;
+                            bestAngleX = rotX;
+                            bestAngleY = rotY;
+                        }
+                    }
+                }
+                container.rotation.set(bestAngleX, bestAngleY, 0);
+                rotationVelocityX = 0;
+                rotationVelocityY = 0;
             }
-            lastState = currentState;  // Update lastState
+            lastState = currentState;
 
-            // Tính rotationVelocity chỉ khi ở trạng thái EXPLODE
+            // Tính velocity chỉ khi EXPLODE
             if (state === 'EXPLODE') {
-                const deviation = Math.abs(handX - 0.5);
-                const deadZone = 0.08; // Vùng giữa không xoay (tăng/giảm để điều chỉnh độ nhạy)
-
-                if (deviation < deadZone) {
-                    rotationVelocity = 0; // Đứng yên khi tay ở giữa
+                // Cho trục Y (trái phải)
+                const deviationX = Math.abs(handX - 0.5);
+                const deadZone = 0.08;
+                if (deviationX < deadZone) {
+                    rotationVelocityY = 0;
                 } else {
-                    const direction = (handX < 0.5) ? -1 : 1; // Trái: xoay âm, Phải: xoay dương
-                    const strength = (deviation - deadZone) / (0.5 - deadZone); // 0 -> 1 khi ra rìa
-                    rotationVelocity = direction * strength * 0.05; // Giảm từ 0.08 xuống 0.05 để xoay chậm hơn
+                    const directionX = (handX < 0.5) ? -1 : 1;
+                    const strengthX = (deviationX - deadZone) / (0.5 - deadZone);
+                    rotationVelocityY = directionX * strengthX * 0.05;
+                }
+
+                // Cho trục X (lên xuống)
+                const deviationY = Math.abs(handY - 0.5);
+                if (deviationY < deadZone) {
+                    rotationVelocityX = 0;
+                } else {
+                    const directionY = (handY < 0.5) ? 1 : -1; // Tay lên (y nhỏ): +x (ngửa lên)
+                    const strengthY = (deviationY - deadZone) / (0.5 - deadZone);
+                    rotationVelocityX = directionY * strengthY * 0.05;
                 }
             } else {
-                rotationVelocity = 0;
+                rotationVelocityX = 0;
+                rotationVelocityY = 0;
             }
 
-            // Update các particle groups
-            updateParticleGroup(groupGold, state, speed, rotationVelocity, time, false);
-            updateParticleGroup(groupRed, state, speed, rotationVelocity, time, true);
-            updateParticleGroup(groupGift, state, speed, rotationVelocity, time, false);
+            // Áp dụng xoay cho container
+            container.rotation.x += rotationVelocityX;
+            container.rotation.y += rotationVelocityY;
 
-            // Update ảnh trong trạng thái EXPLODE
+            // Reset container rotation khi không EXPLODE
+            // Reset container rotation khi không ở trạng thái EXPLODE
+if (state !== 'EXPLODE') {
+    const targetQuaternion = new THREE.Quaternion(); // Quaternion cho rotation (0,0,0)
+    container.quaternion.slerp(targetQuaternion, 0.1); // 0.1 = tốc độ mượt (tăng để nhanh hơn)
+}
+
+            // Update particle groups (xoay TREE giữ nguyên)
+            updateParticleGroup(groupGold, state, speed, time, false);
+            updateParticleGroup(groupRed, state, speed, time, true);
+            updateParticleGroup(groupGift, state, speed, time, false);
+
+            // Update ảnh
             if (state === 'EXPLODE') {
                 titleMesh.visible = false; starMesh.visible = false;
                 
-                const baseAngle = groupGold.rotation.y; // Dùng rotation của groupGold làm base (đã tích lũy)
-                const angleStep = (Math.PI * 2) / 5;
                 let bestIdx = 0; let maxZ = -999;
+                const worldPos = new THREE.Vector3();
 
                 photoMeshes.forEach((mesh, i) => {
                     mesh.visible = true;
-                    const angle = baseAngle + i * angleStep;
-                    const x = Math.sin(angle) * CONFIG.photoOrbitRadius;
-                    const z = Math.cos(angle) * CONFIG.photoOrbitRadius;
-                    const y = Math.sin(time + i) * 3; 
-
-                    mesh.position.lerp(new THREE.Vector3(x, y, z), 0.1);
+                    mesh.position.lerp(photoTargets[i], 0.1);
+                    const yOffset = Math.sin(time + i) * 3; // Giữ float nhẹ
+                    mesh.position.y += yOffset - mesh.position.y * 0.1; // Adjust để không mất offset
                     mesh.lookAt(camera.position);
+
+                    mesh.getWorldPosition(worldPos);
+                    const z = worldPos.z;
 
                     if (z > maxZ) { maxZ = z; bestIdx = i; }
                     
@@ -406,9 +457,10 @@
 
                 if(results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                     const lm = results.multiHandLandmarks[0];
-                    handX = lm[9].x; // Cổ tay giữa (x từ 0 trái -> 1 phải)
+                    handX = lm[9].x; 
+                    handY = lm[9].y; // New: y cho xoay lên xuống
 
-                    const tips = [8,12,16,20]; // Đầu các ngón (trừ cái)
+                    const tips = [8,12,16,20];
                     const wrist = lm[0];
                     let openDist = 0;
                     tips.forEach(i => openDist += Math.hypot(lm[i].x-wrist.x, lm[i].y-wrist.y));
